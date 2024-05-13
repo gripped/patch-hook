@@ -13,3 +13,6 @@ By default directories are created under /var/patch-hook.
 
 A work in progress. I might accidentally introduce a bug which deletes your root partition. The bug might already be there ?
 If that's unacceptable **DON'T USE IT**.
+
+patch_hook_path = '/usr/local/bin/patch-hook'
+patch-hook needs to be there or change the line above in add-hook to reflect where is is located.
