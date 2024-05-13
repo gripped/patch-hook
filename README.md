@@ -15,4 +15,4 @@ A work in progress. I might accidentally introduce a bug which deletes your root
 If that's unacceptable **DON'T USE IT**.
 
 patch_hook_path = '/usr/local/bin/patch-hook'   
-patch-hook needs to be there or change the line above in add-hook to reflect where is is located.
+patch-hook needs to be there or change the line above in add-hook to reflect where it is located.
