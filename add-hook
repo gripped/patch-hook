@@ -1,0 +1,33 @@
+#!/usr/bin/python
+
+import os
+import sys
+
+patch_hook_path = '/usr/local/bin/patch-hook'
+
+package = sys.argv[1]
+
+hook = f"[Trigger]\n\
+Operation = Install\n\
+Operation = Upgrade\n\
+Type = Package\n\
+Target = {package}\n\
+\n\
+[Action]\n\
+Description = Build patched {package} if needed\n\
+When = PostTransaction\n\
+Exec = {patch_hook_path}\n\
+NeedsTargets\n"
+
+if not os.path.exists('/etc/pacman.d/hooks'):
+    try:
+        os.mkdir('/etc/pacman.d/hooks')
+    except:
+        print("Something seriously wrong")
+        print("Can't create /etc/pacman.d/hooks")
+        sys.exit(1)
+
+with open(f'/etc/pacman.d/hooks/zzz-{package}.hook', 'w') as file:
+    file.write(hook)
+print(f'Hook for {package} written to /etc/pacman.d/hooks/zzz-{package}.hook')
+

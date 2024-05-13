@@ -1,0 +1,79 @@
+### patch-hook configuration file
+### 
+#########################################################################################################################################
+
+#chroot = True
+#cleanup_after = True
+#colours = True
+#log = False
+#makepkg_conf = 
+#patch_hook_dir = 
+#patch_hook_build_dir = 
+#patch_hook_cache_dir = 
+#patch_hook_log_dir = 
+#patch_hook_patch_dir = 
+#print_sys_cmds = False
+#quiet = True
+#safe_efi = True
+#remove_make_depends = True
+#user = 
+
+#########################################################################################################################################
+##
+### Values True,true and False,false are reserved for Booleans
+##
+## chroot: Boolean					True:	Build in a  clean chroot. (Default True)
+##									False:	Build normally with existing installed packages.
+##									Default	True
+##
+## cleanup_after: Boolean			True:	Delete all build files after creating the package(s).
+##									False:	Leave build files after creating the package(s).
+##									Default	True
+##
+## colours: Boolean					True:	Colourful output.
+##									False:	No Colourful output.
+##									Default	True
+##
+## log: Boolean						True:   Save messages to logfile
+##									False:  Don't save messages to logfile
+##									Default	False
+##
+## makepkg_conf: String						Use alternative makepkg.conf
+##									Default	Empty string (/etc/makepkg.conf)
+##
+## patch_hook_dir: String					Main patch-hook dir the others will be as below unless they are manually set to another dir.
+##									Default	Empty string (/var/patch-hook)
+##
+## patch_hook_build_dir: String				Directory the build files are stored in.
+##									Default	Empty string (/var/patch-hook/build)
+##
+## patch_hook_cache_dir: String				Directory the built packages are stored in.
+##									Default	Empty string (/var/patch-hook/cache)
+##
+## patch_hook_log_dir: String				Directory the logs are stored in.
+##									Default	Empty string (/var/patch-hook/cache)
+##
+## patch_hook_patch_dir: String				Directory the packages patches are located in. Format patches/$PKGNAME/$PATCHES
+##									Default	Empty string (/var/patch-hook/patches)
+##
+## print_sys_cmds: Boolean			True:   Print the shell commands sent to subprocess.
+##									False:	Don't print the shell commands sent to subprocess.
+##									Default	False
+##
+## quiet: Boolean					True:   Don't output stdour and stderr from subprocess commands.
+##									False:	Do output stdour and stderr from subprocess commands.
+##									Default	True
+##
+## safe_efi: Boolean				True:   Remount efivars read only while chroot is mounted.
+## safe_efi							False:  Don't remount efivars.
+##									Default	True
+##
+## remove_make_depends				True:   Remove any makedepends which were installed to build the package (non chroot builds).
+##									False:  Leave makedepends  installed after building the package (non chroot builds).
+##									Default	False
+##
+## user: String								User to be used for non root processes and instructions.
+##									Default	Empty string (user with UID 1000)
+
+
+

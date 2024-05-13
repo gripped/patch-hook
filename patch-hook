@@ -1,0 +1,720 @@
+#!/usr/bin/python -u
+#
+#  patch-hook - patch and recompile pacman packages on upgrade or install.
+#
+
+import fileinput
+import glob
+import os
+import pwd
+import shutil
+import subprocess
+import sys
+import time
+from configparser import ConfigParser
+from datetime import datetime
+from pathlib import Path
+from threading import Thread
+
+### Defaults overidden if a config file is found ###
+chroot = True
+cleanup_after = True
+colours = True
+custom_git = ''
+log = False
+makepkg_conf = ''
+patch_hook_dir = ''
+patch_hook_build_dir = ''
+patch_hook_cache_dir = ''
+patch_hook_log_dir = ''
+patch_hook_patch_dir = ''
+print_sys_cmds = True
+quiet = True
+safe_efi = True
+remove_make_depends = False
+user = ''
+####################
+
+ROOT = [0, 0]
+OUTPUT = "OUT"
+EXIT_CODE = "EXIT"
+all_depends = make_depends = []
+log_file = ''  # Don't edit this, will become a file descriptor
+
+
+class Color:
+    CYAN = '\033[34m'
+    ORANGE = '\033[33m'
+    GREEN = '\033[36m'
+    RED = '\033[31m'
+    END = '\033[0m'
+
+
+def apply_patches(patches):
+    def try_patch_dir(pdir):
+        patched_num = 0
+        os.chdir(f'{pkg_build_dir}/src/{pdir}')
+        colprint(f'Try ¬{pkg_build_dir}/src/{pdir}¬', Color.CYAN)
+        for patch in patches:
+            colprint(f'Patch ¬{patch}¬', Color.CYAN)
+            if run_command(f"patch -p1 < ../{patch}", EXIT_CODE) == 0:
+                colprint(f'Patch ¬{patch}¬ applied sucessfully', Color.CYAN)
+                patched_num += 1
+        return patched_num
+
+    if 'dummy.diff' in patches:
+        return True
+    colprint(f"Applying patches", Color.CYAN)
+    patched_total = 0
+    sub_dirs = [f.name for f in os.scandir(f'{pkg_build_dir}/src') if f.is_dir()]
+    tried = []
+    colprint(f"Try the most likely dirs first:", Color.CYAN)
+    for sub_dir in sub_dirs:
+        if ((sub_dir == pkg_details['pkgbase']) or (sub_dir == pkg_to_patch)
+                or (sub_dir == f"{pkg_details['pkgbase']}-{pkg_details['pkgver']}") or (sub_dir == f"{pkg_to_patch}-{pkg_details['pkgver']}")):
+            tried.append(sub_dir)
+            patched_total = try_patch_dir(sub_dir)
+    if patched_total == len(patches):
+        colprint("All patches applied", Color.CYAN)
+        return True
+
+    colprint(f"Try them all then :)", Color.CYAN)
+    for sub_dir in sub_dirs:
+        if sub_dir not in tried:
+            patched_total = patched_total + try_patch_dir(sub_dir)
+            if patched_total == len(patches):
+                colprint("All patches applied", Color.CYAN)
+                return True
+    return False
+
+
+def argument():
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+    return sys.stdin.readline().strip()
+
+
+def build_package():
+    if Path(f"{patch_dir}/{pkg_to_patch}.py").is_file():
+        custom_code('build')
+    os.chdir(pkg_build_dir)
+    colprint(f"Downloading ¬{pkg_details['pkgbase']}¬ source code", Color.CYAN)
+    switch_to_user(normal_user)
+    if run_command(f"makepkg -o --skippgpcheck -C --noconfirm --config ../makepkg.conf", EXIT_CODE) != 0:
+        colprint('makepkg -o failed. Quitting', Color.RED)
+        sys.exit(1)
+    patch_list = copy_patches()
+    if apply_patches(patch_list):
+        os.chdir(pkg_build_dir)
+        colprint(f"Compiling ¬{pkg_details['pkgbase']}¬", Color.CYAN)
+        if Path(f"{patch_dir}/{pkg_to_patch}.py").is_file():
+            custom_code('build2')
+        if run_command(f'makepkg -e --skippgpcheck --noconfirm --config ../makepkg.conf', EXIT_CODE) != 0:
+            colprint('makepkg -se failed. Quitting', Color.RED)
+            sys.exit(1)
+        colprint(f"Yay! pkgbase ¬{pkg_details['pkgbase']}¬ patched and built", Color.CYAN)
+        switch_to_user(ROOT)
+        return True
+    switch_to_user(ROOT)
+
+
+def checkout_arch_stable():
+    if pkg_details['distro'] == 'alhp':
+        pkgrel = pkg_details['pkgrel'].split('.')[-1]
+    else:
+        pkgrel = pkg_details['pkgrel']
+    colprint(f"Finding ¬{pkg_details['pkgbase']}¬ latest stable version", Color.CYAN)
+    long_version = f"{pkg_details['pkgver']}-{pkgrel}"
+    chksum = run_command(f"git -C {pkg_build_dir} show-ref --tags {long_version}", OUTPUT).split(' ')[0].strip()
+    colprint(f"Checking out ¬{pkg_details['pkgbase']}¬ stable version - ¬{pkg_details['pkgver']}-{pkgrel}¬", Color.CYAN)
+    run_command(f"git -C {pkg_build_dir} checkout {chksum}", OUTPUT)
+    if pkg_details['distro'] == 'alhp':
+        edit_alhp_pkgrel()
+
+
+def checkout_artix_stable():
+    colprint(f"Finding ¬{pkg_details['pkgbase']}¬ latest stable version", Color.CYAN)
+    long_version = f"{pkg_details['pkgver']}-{pkg_details['pkgrel']}"
+    chksum = run_command(f"git -C {pkg_build_dir} log --grep=-{long_version} --format=%H -n 1", OUTPUT).strip()
+    migrate_commit = subprocess.check_output(['git', '-C', f'{pkg_build_dir}', 'log', '--grep={}'.format('migrate to new layout'), '--format=%H', '-n', '1']).decode().strip()
+    if migrate_commit:
+        chksum_date = datetime.strptime(run_command(f"git -C {pkg_build_dir} show -s --format=%ci {chksum}", OUTPUT).strip(), '%Y-%m-%d %H:%M:%S %z')
+        migrate_commit_date = datetime.strptime(subprocess.check_output(['git', 'show', '-s', '--format=%ci', migrate_commit], cwd=pkg_build_dir).decode().strip(), '%Y-%m-%d %H:%M:%S %z')
+        if migrate_commit_date > chksum_date:
+            chksum = migrate_commit
+    colprint(f"Checking out ¬{pkg_details['pkgbase']}¬ stable version - ¬{pkg_details['pkgver']}-{pkg_details['pkgrel']}¬", Color.CYAN)
+    run_command(f"git -C {pkg_build_dir} checkout {chksum}", OUTPUT)
+
+
+def chroot_exit():
+    colprint('Leaving chroot', Color.CYAN)
+    os.fchdir(root_dir_fd)
+    os.chroot('.')
+    os.close(root_dir_fd)
+    chroot_unmount()
+    if safe_efi:
+        run_command('mount -o remount,rw /sys/firmware/efi/efivars', EXIT_CODE)
+    return True
+
+
+def chroot_make():
+    def chroot_artix_strap():
+        def rank_mirrors():
+            def run_curl(url, mirror_url):
+                output = run_command(f'curl -s -m 2 -w "%{{http_code}} %{{time_total}}" {url} -o /dev/null', OUTPUT)
+                output_list.append(f'{output} {mirror_url}')
+
+            colprint(f'Selecting fastest mirror', Color.CYAN)
+            lines = run_command("curl -sS https://gitea.artixlinux.org/packages/artix-mirrorlist/raw/branch/master/mirrorlist", OUTPUT).split('\n')
+            mirrors = [line.replace('Server = ', '').replace('https:', 'http:').strip() for line in lines if line.startswith('Server = ')
+                       and ('https://artix.' not in line and '.artixlinux.' not in line)]
+            thread_list = []
+            output_list = []
+            for line in mirrors:
+                time_url = line.replace('$repo', 'system').replace('$arch', 'x86_64/system.db')
+                thread = Thread(target=run_curl, args=(time_url, line))
+                thread_list.append(thread)
+                thread.start()
+            for thread in thread_list:
+                thread.join()
+            filtered_list = [item for item in output_list if item.startswith('200')]
+            sorted_list = sorted(filtered_list, key=lambda x: float(x.split()[1]))
+            fastest_mirror_url = sorted_list[0].split()[2]
+            colprint(f"\nUsing mirror ¬{fastest_mirror_url.split('/')[2]}¬ time ¬{sorted_list[0].split()[1]}¬", Color.CYAN)
+            return fastest_mirror_url
+
+        if run_command(f'git clone https://github.com/gripped/artix-bootstrap.git {patch_hook_build_dir}/artix-bootstrap', EXIT_CODE) != 0:
+            return False
+        os.chdir(f'{patch_hook_build_dir}/artix-bootstrap')
+        [print(line.replace('${INIT} elogind-${INIT}', 'base-devel'), end='') for line in fileinput.input('artix-bootstrap.sh', inplace=True)]
+        mirror = rank_mirrors()
+        colprint('Running artix-bootstrap. Could take a while....', Color.CYAN)
+        if run_command(f"./artix-bootstrap.sh -r {mirror.replace('/$repo/os/$arch', '')} {chroot_dir}", EXIT_CODE) != 0:
+            return False
+        return True
+
+    def chroot_arch_strap():
+        if run_command(f'git clone https://github.com/archlinux/arch-install-scripts.git {patch_hook_build_dir}/arch-install-scripts', EXIT_CODE) != 0:
+            return False
+        if pkg_to_patch != 'pacman':
+            if run_command(f'git clone https://gitlab.archlinux.org/archlinux/packaging/packages/pacman.git {patch_hook_build_dir}/pacman', EXIT_CODE) != 0:
+                return False
+        shutil.copyfile(f'{patch_hook_build_dir}/pacman/pacman.conf', f'{patch_hook_build_dir}/arch-install-scripts/pacman.conf')
+        os.chdir(f'{patch_hook_build_dir}/arch-install-scripts')
+        [print(line.replace('Include = /etc/pacman.d/mirrorlist', 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch'), end='') for line in fileinput.input('pacman.conf', inplace=True)]
+        with open(f'pacman.conf', 'a') as file:
+            file.write("\n[multilib]\nServer = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n")
+        if run_command(f"make pacstrap", EXIT_CODE) != 0:
+            return False
+        os.chmod('pacstrap', 0o755)
+        colprint(f'Running pacstrap. Could take a while....', Color.CYAN)
+        if run_command(f"./pacstrap -C pacman.conf -M {chroot_dir} base base-devel", EXIT_CODE) != 0:
+            return False
+        shutil.copyfile('pacman.conf', f'{chroot_dir}/etc/pacman.conf')
+        shutil.copyfile('/etc/resolv.conf', f'{chroot_dir}/etc/resolv.conf')
+        return True
+
+    colprint(f'Setting up chroot', Color.CYAN)
+    if safe_efi:
+        if run_command('mount -o remount,ro /sys/firmware/efi/efivars', EXIT_CODE) != 0:
+            colprint('Failed to remount efivar ro. Quitting', Color.RED)
+            sys.exit(1)
+    os.mkdir(f'{chroot_dir}/')
+    with open(f'{chroot_dir}/.chroot', 'w') as file:
+        file.write('')
+    if pkg_details['distro'] == 'artix' or pkg_details['distro'] == 'custom':
+        if not chroot_artix_strap():
+            colprint('Failed to bootstrap Artix. Quitting', Color.RED)
+            sys.exit(1)
+    else:
+        if not chroot_arch_strap():
+            colprint('Failed to bootstrap Arch. Quitting', Color.RED)
+            sys.exit(1)
+    return True
+
+
+def chroot_setup():
+    def chroot_mounts():
+        os.makedirs(f"{chroot_dir}{patch_hook_build_dir}")
+        os.makedirs(f"{chroot_dir}{patch_hook_log_dir}")
+        patch_dir = f"{patch_hook_patch_dir}/{pkg_to_patch}"
+        os.makedirs(f"{chroot_dir}{patch_dir}")
+        [os.link(os.path.join(patch_dir, file), os.path.join(chroot_dir, patch_dir[1:], file)) for file in os.listdir(patch_dir)]
+        run_command(f"mount -v --bind {chroot_dir} {chroot_dir}", OUTPUT)
+        run_command(f"mount -v --bind {patch_hook_build_dir} {chroot_dir}{patch_hook_build_dir}", OUTPUT)
+        run_command(f"mount -v --types proc /proc {chroot_dir}/proc", OUTPUT)
+        run_command(f"mount -v --rbind --make-rslave /sys {chroot_dir}/sys", OUTPUT)
+        run_command(f"mount -v --rbind --make-rslave /dev {chroot_dir}/dev", OUTPUT)
+
+    def dkill():
+        run_command(f"pacman -Rdd --noconfirm systemd systemd-libs", OUTPUT)
+        with open(f'{patch_hook_build_dir}/PKGBUILD', 'w') as file:
+            file.write("pkgname=dkill\npkgver=1\npkgrel=1\narch=(any)\nprovides=(systemd-libs libsystemd.so systemd lib32-systemd)\n"
+                       "replaces=(systemd-libs systemd lib32-systemd)\n")
+        os.chdir(patch_hook_build_dir)
+        switch_to_user(normal_user)
+        run_command('makepkg', OUTPUT)
+        switch_to_user(ROOT)
+        run_command('pacman -U --noconfirm dkill-1-1-any.pkg.tar.zst', OUTPUT)
+
+    if not chroot_make():
+        colprint('Failed to create chroot. Quiting', Color.RED)
+        sys.exit(1)
+    os.chdir(chroot_dir)
+    chroot_mounts()
+    os.chroot(chroot_dir)
+    if pkg_details['distro'] != 'artix':
+        dkill()
+    need_deps = run_command(f"pacman -Sp {pkg_details['pkgbase']}", OUTPUT).split('\n')
+    if all_depends:
+        colprint(f'Installing ¬{len(need_deps) - 1}¬ dependancies. Could take a while....{Color.END}', Color.CYAN)
+        if run_command(f"pacman -S --needed --noconfirm {' '.join(all_depends)}", EXIT_CODE) != 0:
+            colprint("Failed to install 'depends' in chroot.", Color.RED)
+            colprint("Quitting.", Color.RED)
+            sys.exit(1)
+        return
+    return
+
+
+def chroot_unmount():
+    sys_mounts = ['dev', 'proc', 'sys']
+    for sys_mount in sys_mounts:
+        run_command(f'umount -vR {chroot_dir}/{sys_mount}', EXIT_CODE)
+    run_command(f'umount -vR {chroot_dir}', EXIT_CODE)
+    mnts_not_gone = run_command(f"mount |grep {patch_hook_build_dir}/chroot | awk '{{print $3}}'", OUTPUT).replace('\n', ' ').split(' ')[:-1]
+    if mnts_not_gone:
+        run_command(f'umount -vl {chroot_dir}', EXIT_CODE)
+    return True
+
+
+def cleanup():
+    if chroot and 'chroot_dir' in globals():
+        if chroot_dir and Path(chroot_dir).is_dir():
+            colprint(f"Removing chroot ¬{chroot_dir}¬", Color.CYAN)
+            shutil.rmtree(chroot_dir)
+    if patch_hook_build_dir:
+        colprint(f"Removing any build files in ¬{patch_hook_build_dir}¬", Color.CYAN)
+        build_files = glob.glob(f'{patch_hook_build_dir}/*')
+        for build_file in build_files:
+            if Path(build_file).is_file():
+                os.remove(build_file)
+            if Path(build_file).is_dir():
+                shutil.rmtree(build_file)
+
+
+def colprint(text, color=Color.END):
+    global temp_log
+    parts = text.split('¬')
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            print(color, end='')
+        else:
+            print(Color.END, end='')
+        print(part, end='')
+    print(f'{Color.END}')
+    if log or temp_log:
+        if log_file:
+            os.write(log_file, f"{text.replace('¬', '')}\n".encode())
+        else:
+            temp_log = temp_log + f'{text}\n'
+
+
+def config():
+    p_hook_conf_path = ''
+    for config_file in ['/etc/patch-hook.conf', '/etc/patch-hook/patch-hook.conf', f'/etc/patch-hook/{pkg_to_patch}.conf']:
+        if Path(config_file).is_file():
+            p_hook_conf_path = config_file
+    if p_hook_conf_path:
+        valid = ['chroot', 'cleanup_after', 'colours', 'custom_git', 'log', 'makepkg_conf', 'patch_hook_dir',
+                 'patch_hook_build_dir', 'patch_hook_cache_dir', 'patch_hook_patch_dir', 'print_sys_cmds',
+                 'quiet', 'safe_efi', 'remove_make_depends', 'user']
+        config = ConfigParser()
+        with open(p_hook_conf_path) as stream:
+            config.read_string("[SECTION]\n" + stream.read())
+        for key in valid:
+            if key in config['SECTION']:
+                value = config['SECTION'][key].replace('"', '').replace("'", '')
+                if value:
+                    globals()[key] = value
+        for var_name in valid:
+            if isinstance(globals()[var_name], str) and globals()[var_name].lower() in ['true', 'false']:
+                globals()[var_name] = globals()[var_name].lower() == 'true'
+        colprint(f'Loaded config from ¬{p_hook_conf_path}¬', Color.CYAN)
+    else:
+        colprint('No config file found, using defaults', Color.CYAN)
+    return p_hook_conf_path
+
+
+def copy_patches():
+    colprint("Copying Patches", Color.CYAN)
+    # patches = os.listdir(patch_dir)
+    patches = [p for p in os.listdir(patch_dir) if p.endswith(('.diff', '.patch'))]
+    for patch in patches:
+        shutil.copyfile(f'{patch_dir}/{patch}', f'{pkg_build_dir}/src/{patch}')
+    return patches
+
+
+def copy_pkgs_to_cache(install_list):
+    for pkg in install_list:
+        pkg_name = pkg.split('/')[-1]
+        shutil.copyfile(pkg, os.path.join(patch_hook_cache_dir, pkg_name))
+        colprint(f'Copied ¬{pkg_name}¬ to ¬{patch_hook_cache_dir}¬', Color.CYAN)
+
+
+def create_log_file():
+    logfile = f'{patch_hook_log_dir}/{pkg_to_patch}-{time.strftime("%Y-%m-%d-%H:%M:%S")}-log'
+    fd = os.open(logfile, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    os.chown(logfile, normal_user[0], normal_user[1])
+    os.chmod(logfile, 0o660)
+    os.write(fd, temp_log.encode())
+    return fd
+
+
+def custom_code(section):
+    with open(f"{patch_dir}/{pkg_to_patch}.py") as f: exec(f.read())
+
+
+def edit_alhp_pkgrel():
+    with open(f'{pkg_build_dir}/PKGBUILD', 'r') as file:
+        lines = file.readlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith('pkgrel'):
+            lines[i] = f"{line.split('=')[0]}={line.split('=')[-1].strip()}.1\n"
+            break
+    with open(f'{pkg_build_dir}/PKGBUILD', 'w') as file:
+        file.writelines(lines)
+
+
+def exit_now(num):
+    if log and log_file:
+        os.close(log_file)
+    os._exit(num)
+
+
+def get_build_files():
+    colprint(f"Cloning ¬{pkg_details['pkgbase']}¬ build files", Color.CYAN)
+    if custom_git:
+        url = custom_git
+    elif pkg_details['distro'] == 'artix':
+        url = f"https://gitea.artixlinux.org/packages/{pkg_details['pkgbase']}.git"
+    else:
+        url = f"https://gitlab.archlinux.org/archlinux/packaging/packages/{pkg_details['pkgbase']}.git"
+    switch_to_user(normal_user)
+    if run_command(f"git clone {url} {pkg_build_dir}", EXIT_CODE) != 0:
+        colprint(f"Failed to clone build files. Quitting ¬{pkg_build_dir}¬", Color.RED)
+        sys.exit(1)
+    switch_to_user(ROOT)
+
+
+def get_depends(depend_types):
+    colprint("Testing for needed 'depends'", Color.CYAN)
+    if not Path(f'{pkg_build_dir}/.SRCINFO').exists():
+        colprint("No ¬.SRCINFO¬ Creating one", Color.CYAN)
+        os.chdir(pkg_build_dir)
+        switch_to_user(normal_user)
+        if run_command(f"makepkg --printsrcinfo > .SRCINFO", EXIT_CODE):
+            colprint(f"Failed to create ¬.SRCINFO¬ Quitting", Color.RED)
+            sys.exit(1)
+        switch_to_user(ROOT)
+    with open(f'{pkg_build_dir}/.SRCINFO') as file:
+        lines = file.readlines()
+    depend_list = []
+    for depend_type in depend_types:
+        if not depend_type:
+            continue
+        for line in lines:
+            if line.strip().startswith(depend_type):
+                pkg_name = line.split('=')[1].strip()
+                if not chroot:
+                    if package_is_installed(pkg_name):
+                        continue
+                depend_list.append(pkg_name)
+    return depend_list
+
+
+def get_pkg_details():
+    long_version = run_command(f'pacman -Q {pkg_to_patch}', OUTPUT).split(' ')[1].strip()
+    desc_file = f"/var/lib/pacman/local/{pkg_to_patch}-{long_version}/desc"
+    pkgver = long_version.split('-')[0]
+    pkgrel = long_version.split('-')[1]
+    with open(desc_file, 'r') as file:
+        lines = file.readlines()
+    for i, line in enumerate(lines):
+        if line.strip() == '%BASE%':
+            pbase = lines[i + 1].strip()
+            if pbase != pkg_to_patch:
+                colprint(f'pkgbase for requested package ¬{pkg_to_patch}¬ is ¬{pbase}¬', Color.CYAN)
+        if line.strip() == '%PACKAGER%':
+            packager = lines[i + 1].strip()
+            if "patch-hook" in packager:
+                if not custom_git:
+                    colprint(f'Already patched ¬{pkg_to_patch}¬ Quitting', Color.ORANGE)
+                    exit_now(0)
+                else:
+                    ask = input(f"\nPatch {pkg_to_patch} ? y/N: ")
+                    if ask.lower() != 'y':
+                        exit_now(0)
+            if custom_git:
+                distro = "custom"
+                break
+            colprint(f'Getting ¬{pkg_to_patch}¬ details', Color.CYAN)
+            if "@artixlinux.org" in packager:
+                distro = "artix"
+            elif "me.O3" in packager or "me.std" in packager:  ################################################
+                distro = "alhp"
+            elif "@archlinux.org" in packager:
+                distro = "arch"
+            elif "alhp@" in packager:
+                distro = "alhp"
+            else:
+                colprint(f"Script only handles ¬Artix¬ and ¬Arch(+Alhp)¬ and setup custom packages. Quitting", Color.RED)
+                exit_now(1)
+            break
+    p_dict = {'pkgname': pkg_to_patch, 'pkgbase': pbase, 'distro': distro, 'pkgver': pkgver, 'pkgrel': pkgrel}
+    return p_dict
+
+
+def get_user():
+    if user:
+        uid = pwd.getpwnam(user).pw_uid
+        gid = pwd.getpwnam(user).pw_gid
+    else:
+        uid = 1000
+        gid = pwd.getpwuid(uid).pw_gid
+    return [uid, gid]
+
+
+def get_wanted_pkg_list():
+    colprint(f"Checking installed packages from pkgbase {pkg_details['pkgbase']}", Color.CYAN)
+    available_packages = glob.glob(f'{pkg_build_dir}/*.pkg.tar.*')
+    to_install = []
+    for i, available_package in enumerate(available_packages):
+        available_package = available_package.split('/')[-1]
+        if '-x86_64.pkg.tar.zst' in available_package:
+            available_package = available_package.replace('-x86_64.pkg.tar.zst', '')
+        elif '-any.pkg.tar.zst' in available_package:
+            available_package = available_package.replace('-any.pkg.tar.zst', '')
+        else:
+            colprint(f"Failed to process which packages are installed. Any packages built are in ¬{pkg_build_dir}¬", Color.RED)
+            colprint("Cleanup disabled", Color.CYAN)  ############################ sort out a cleaner exit
+            global cleanup_after
+            cleanup_after = False
+            sys.exit(1)
+        available_package = '-'.join(available_package.split('-')[:-1]) + f"-{pkg_details['pkgrel']}"  # Remove the pkgrel add the one from get_pkg_details() (alhps)
+        if Path(f'/var/lib/pacman/local/{available_package}/desc').exists() or custom_git:  # Fix me
+            to_install.append(available_packages[i])
+    return to_install
+
+
+def install_deps(depends):
+    colprint("Installing makedepends", Color.CYAN)
+    if run_command(f"pacman -S --noconfirm {' '.join(depends)}", EXIT_CODE) == 0:
+        return
+    else:
+        colprint('Failed to install makedepends. Quitting', Color.RED)
+        sys.exit(1)
+
+
+def package_is_installed(pkg):
+    missing = run_command(f"pacman -Q {pkg}", EXIT_CODE)
+    if not missing:
+        return True
+
+
+def run_command(cmd, opt):
+    try:
+        if print_sys_cmds:
+            colprint(f'{cmd}', Color.GREEN)
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, text=True, user=os.geteuid(), group=os.getegid())
+        os.set_blocking(process.stdout.fileno(), False)
+        os.set_blocking(process.stderr.fileno(), False)
+        stdout_lines = []
+        while True:
+            stdout_line = process.stdout.readline()
+            stderr_line = process.stderr.readline()
+            if stdout_line:
+                stdout_lines.append(stdout_line)
+                if not quiet:
+                    print(stdout_line, end='')
+                if log and log_file:
+                    os.write(log_file, stdout_line.encode())
+            if stderr_line:
+                if not quiet:
+                    print(stderr_line, end='')
+                if log and log_file:
+                    os.write(log_file, stderr_line.encode())
+            if process.poll() is not None and stdout_line == '' and stderr_line == '':
+                break
+        if opt == OUTPUT:
+            return ''.join(stdout_lines)
+        if opt == EXIT_CODE:
+            return process.returncode
+    except Exception as e:
+        colprint(*e.args, Color.RED)
+        return 'Error'
+
+
+def setup_build_files():
+    test = f"{patch_dir}/{pkg_to_patch}.py"
+    if Path(f"{patch_dir}/{pkg_to_patch}.py").is_file():
+        custom_code('setup')
+        return
+    if pkg_details['distro'] == 'artix':
+        checkout_artix_stable()
+    else:
+        checkout_arch_stable()
+
+
+def setup_dirs():
+    def check_user_dir(cu_dir):
+        if not Path(cu_dir).is_dir():
+            colprint(f"User supplied dir ¬{cu_dir}¬ does not exist", Color.RED)
+            colprint("or is not a dir. Quitting", Color.RED)
+            exit_now(1)
+
+    def make_dir(mdir):
+        if not Path(mdir).exists():
+            os.makedirs(mdir)
+
+    p_hook_dir = patch_hook_dir if patch_hook_dir else '/var/patch-hook'
+    p_hook_build_dir = patch_hook_build_dir if patch_hook_build_dir else f'{p_hook_dir}/build'
+    p_hook_cache_dir = patch_hook_cache_dir if patch_hook_cache_dir else f'{p_hook_dir}/cache'
+    p_hook_log_dir = patch_hook_log_dir if patch_hook_log_dir else f'{p_hook_dir}/log'
+    p_hook_patch_dir = patch_hook_patch_dir if patch_hook_patch_dir else f'{p_hook_dir}/patches'
+
+    if patch_hook_build_dir:
+        if not Path(patch_hook_build_dir).is_dir():
+            colprint(f"User supplied dir ¬{patch_hook_build_dir}¬ does not exist", Color.RED)
+            colprint(f"or is not a dir. Quitting.", Color.RED)
+            exit_now(1)
+        else:
+            if len(os.listdir(patch_hook_build_dir)):
+                colprint(f"Build dir ¬{patch_hook_build_dir}¬ is not empty.", Color.RED)
+                colprint("You need to fix that manually. Quitting.", Color.RED)
+                exit_now(1)
+    else:
+        if not Path(p_hook_build_dir).is_dir() and not Path(p_hook_build_dir).exists():
+            make_dir(p_hook_build_dir)
+        elif len(os.listdir(p_hook_build_dir)):
+            colprint(f"Build dir ¬{p_hook_build_dir}¬ is not empty.", Color.RED)
+            colprint("You need to fix that manually. Quitting.", Color.RED)
+            exit_now(1)
+    os.chown(p_hook_build_dir, normal_user[0], normal_user[1])
+
+    for usr_dir in [patch_hook_dir, patch_hook_cache_dir, patch_hook_log_dir, patch_hook_patch_dir]:
+        if usr_dir:
+            check_user_dir(usr_dir)
+
+    for make_if_none in [p_hook_dir, p_hook_cache_dir, p_hook_log_dir]:
+        make_dir(make_if_none)
+
+    if not Path(p_hook_patch_dir).is_dir():
+        colprint(f"Patch dir ¬{p_hook_patch_dir}¬ does not exist. Quitting", Color.RED)
+        exit_now(1)
+
+    return p_hook_dir, p_hook_build_dir, p_hook_cache_dir, p_hook_log_dir, p_hook_patch_dir
+
+
+def switch_to_user(usr):
+    os.setegid(usr[0])
+    os.seteuid(usr[1])
+
+
+def tmp_mkpkg_conf():
+    colprint("Creating temporary ¬makepkg.conf¬", Color.CYAN)
+    with open(f'{makepkg_conf}', 'r') as file:
+        lines = file.readlines()
+    for i, line in enumerate(lines):
+        if line.startswith('#PACKAGER=') or line.startswith('PACKAGER='):
+            if line.startswith('#PACKAGER='):
+                line.replace('#PACKAGER=', 'PACKAGER=')
+            line = line.replace('<', '<patch-hook.')
+            lines[i] = line
+    with open(f'{patch_hook_build_dir}/makepkg.conf', 'w') as file:
+        file.writelines(lines)
+
+
+success = False
+temp_log = '\0'
+if not colours:
+    Color.CYAN = Color.RED = Color.GREEN = Color.ORANGE = Color.END
+pkg_to_patch = argument()
+
+try:
+    patch_hook_conf_path = config()
+    normal_user = get_user()
+    patch_hook_dir, patch_hook_build_dir, patch_hook_cache_dir, patch_hook_log_dir, patch_hook_patch_dir = setup_dirs()
+    patch_dir = f"{patch_hook_patch_dir}/{pkg_to_patch}"
+    if log:
+        log_file = create_log_file()
+    temp_log = None
+    pkg_details = get_pkg_details()
+    pkg_build_dir = f"{patch_hook_build_dir}/{pkg_details['pkgbase']}"
+
+except Exception as e:
+    colprint("Something went wrong. Possibly the next line will tell you more?", Color.RED)
+    colprint(' '.join(map(str, e.args)), Color.RED)
+    exit_now(1)
+    
+try:
+    get_build_files()
+    setup_build_files()
+
+    if not makepkg_conf:
+        makepkg_conf = '/etc/makepkg.conf'
+    tmp_mkpkg_conf()
+
+    if chroot:
+        all_depends = get_depends(['depends', 'makedepends', 'checkdepends'])
+        root_dir_fd = os.open("/", os.O_RDONLY)
+        chroot_dir = f'{patch_hook_build_dir}/chroot'
+        chroot_setup()
+    else:
+        make_depends = get_depends(['', 'makedepends', 'checkdepends'])
+        if make_depends:
+            install_deps(make_depends)
+
+    if not build_package():
+        colprint(f"Build of ¬{pkg_details['pkgbase']}¬ Failed. Quitting", Color.RED)
+        sys.exit(1)
+
+    if chroot:
+        chroot_exit()
+
+    pkg_list = get_wanted_pkg_list()
+    if not pkg_list:
+        colprint("We've arived here and there are no packages to install or copy ?", Color.RED)
+        colprint(f"Quitting{' without cleanup' if cleanup_after else ''}.", Color.RED)
+        cleanup_after = False
+        sys.exit(1)
+
+    copy_pkgs_to_cache(pkg_list)
+    success = True
+
+except (Exception, SystemExit) as e:
+    switch_to_user(ROOT)
+    if not isinstance(e, SystemExit):
+        colprint("Something went wrong. Possibly the next line will tell you more?", Color.RED)
+        colprint(' '.join(map(str, e.args)), Color.RED)
+    if Path('/.chroot').exists():
+        os.fchdir(root_dir_fd)
+        os.chroot('.')
+        os.close(root_dir_fd)
+        chroot_unmount()
+    elif chroot and 'chroot_dir' in globals():
+        if run_command(f"mount |grep {patch_hook_build_dir}/chroot | awk '{{print $3}}'", OUTPUT).replace('\n', ' ').split(' ')[:-1]:
+            chroot_unmount()
+
+finally:
+    if remove_make_depends and make_depends:
+        colprint('Removing makedepends', Color.CYAN)
+        run_command(f"pacman -R --noconfirm {' '.join(make_depends)}", EXIT_CODE)
+    if cleanup_after:
+        cleanup()
+    colprint(f"patch-hook ¬{pkg_to_patch}¬ finished {'Successfully.' if success else 'Unsuccessfully.'}", Color.ORANGE)
+    if success:
+        cache_pkgs = os.listdir(patch_hook_cache_dir)
+        colprint(f"To install all packages currently in ¬{patch_hook_cache_dir}¬", Color.CYAN)
+        colprint(f"pacman -U {' '.join([f'{patch_hook_cache_dir}/{cache_pkg}' for cache_pkg in cache_pkgs])}")
+    if log and log_file:
+        os.close(log_file)
