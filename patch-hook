@@ -120,7 +120,7 @@ def build_package():
 
 def checkout_arch_stable():
     if pkg_details['distro'] == 'alhp':
-        pkgrel = pkg_details['pkgrel'].split('.')[-1]
+        pkgrel = pkg_details['pkgrel'].split('.')[0]
     else:
         pkgrel = pkg_details['pkgrel']
     colprint(f"Finding ¬{pkg_details['pkgbase']}¬ latest stable version", Color.CYAN)
