@@ -15,7 +15,7 @@ By default directories are created under /var/patch-hook.
 By default patch-hook will look for patches in dir /var/patch-hook/patches/{pkg_to_patch}  
 Anything .diff or .patch in that dir will be applied as a patch. (except dummy.diff)  
 A file can also be placed in /var/patch-hook/patches/{pkg_to_patch} called {pkg_to_patch}.py  
-This file can contain addtional python code which can be run at various points in the script.  Useful for ediiting PKGBUILD's.
+This file can contain addtional python code which can be run at various points in the script.  Useful for editing PKGBUILD's.
 
 A work in progress. I might accidentally introduce a bug which deletes your root partition. The bug might already be there ?
 If that's unacceptable **DON'T USE IT**.
