@@ -647,6 +647,12 @@ try:
     normal_user = get_user()
     patch_hook_dir, patch_hook_build_dir, patch_hook_cache_dir, patch_hook_log_dir, patch_hook_patch_dir = setup_dirs()
     patch_dir = f"{patch_hook_patch_dir}/{pkg_to_patch}"
+    if not Path(patch_dir).is_dir():
+        colprint(f"Patch dir ¬{patch_dir}¬ does not exist. Quitting", Color.RED)
+        exit_now(1)
+    if not [p for p in os.listdir(patch_dir) if p.endswith(('.diff', '.patch'))]:
+        colprint(f"No patches (*.diff or *.patch in ¬{patch_dir}¬. Quitting", Color.RED)
+        exit_now(1)
     if log:
         log_file = create_log_file()
     temp_log = None
