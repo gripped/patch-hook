@@ -159,37 +159,38 @@ def chroot_exit():
 
 def chroot_make():
     def chroot_artix_strap():
-        def rank_mirrors():
-            def run_curl(url, mirror_url):
-                output = run_command(f'curl -s -m 2 -w "%{{http_code}} %{{time_total}}" {url} -o /dev/null', OUTPUT)
-                output_list.append(f'{output} {mirror_url}')
-
-            colprint(f'Selecting fastest mirror', Color.CYAN)
-            lines = run_command("curl -sS https://gitea.artixlinux.org/packages/artix-mirrorlist/raw/branch/master/mirrorlist", OUTPUT).split('\n')
-            mirrors = [line.replace('Server = ', '').replace('https:', 'http:').strip() for line in lines if line.startswith('Server = ')
-                       and ('https://artix.' not in line and '.artixlinux.' not in line)]
-            thread_list = []
-            output_list = []
-            for line in mirrors:
-                time_url = line.replace('$repo', 'system').replace('$arch', 'x86_64/system.db')
-                thread = Thread(target=run_curl, args=(time_url, line))
-                thread_list.append(thread)
-                thread.start()
-            for thread in thread_list:
-                thread.join()
-            filtered_list = [item for item in output_list if item.startswith('200')]
-            sorted_list = sorted(filtered_list, key=lambda x: float(x.split()[1]))
-            fastest_mirror_url = sorted_list[0].split()[2]
-            colprint(f"\nUsing mirror ¬{fastest_mirror_url.split('/')[2]}¬ time ¬{sorted_list[0].split()[1]}¬", Color.CYAN)
-            return fastest_mirror_url
+    #     def rank_mirrors():
+    #         def run_curl(url, mirror_url):
+    #             output = run_command(f'curl -s -m 2 -w "%{{http_code}} %{{time_total}}" {url} -o /dev/null', OUTPUT)
+    #             output_list.append(f'{output} {mirror_url}')
+    # 
+    #         colprint(f'Selecting fastest mirror', Color.CYAN)
+    #         lines = run_command("curl -sS https://gitea.artixlinux.org/packages/artix-mirrorlist/raw/branch/master/mirrorlist", OUTPUT).split('\n')
+    #         mirrors = [line.replace('Server = ', '').replace('https:', 'http:').strip() for line in lines if line.startswith('Server = ')
+    #                    and ('https://artix.' not in line and '.artixlinux.' not in line)]
+    #         thread_list = []
+    #         output_list = []
+    #         for line in mirrors:
+    #             time_url = line.replace('$repo', 'system').replace('$arch', 'x86_64/system.db')
+    #             thread = Thread(target=run_curl, args=(time_url, line))
+    #             thread_list.append(thread)
+    #             thread.start()
+    #         for thread in thread_list:
+    #             thread.join()
+    #         filtered_list = [item for item in output_list if item.startswith('200')]
+    #         sorted_list = sorted(filtered_list, key=lambda x: float(x.split()[1]))
+    #         fastest_mirror_url = sorted_list[0].split()[2]
+    #         colprint(f"\nUsing mirror ¬{fastest_mirror_url.split('/')[2]}¬ time ¬{sorted_list[0].split()[1]}¬", Color.CYAN)
+    #         return fastest_mirror_url
 
         if run_command(f'git clone https://github.com/gripped/artix-bootstrap.git {patch_hook_build_dir}/artix-bootstrap', EXIT_CODE) != 0:
             return False
         os.chdir(f'{patch_hook_build_dir}/artix-bootstrap')
         [print(line.replace('${INIT} elogind-${INIT}', 'base-devel'), end='') for line in fileinput.input('artix-bootstrap.sh', inplace=True)]
-        mirror = rank_mirrors()
+        # mirror = rank_mirrors()
         colprint('Running artix-bootstrap. Could take a while....', Color.CYAN)
-        if run_command(f"./artix-bootstrap.sh -r {mirror.replace('/$repo/os/$arch', '')} {chroot_dir}", EXIT_CODE) != 0:
+        # if run_command(f"./artix-bootstrap.sh -r {mirror.replace('/$repo/os/$arch', '')} {chroot_dir}", EXIT_CODE) != 0:
+        if run_command(f"./artix-bootstrap.sh {chroot_dir}", EXIT_CODE) != 0:
             return False
         return True
 
@@ -265,6 +266,9 @@ def chroot_setup():
     os.chroot(chroot_dir)
     if pkg_details['distro'] != 'artix':
         dkill()
+    else:
+        run_command('pacman-key --init', OUTPUT)
+        run_command('pacman-key --populate artix', OUTPUT)
     need_deps = run_command(f"pacman -Sp {pkg_details['pkgbase']}", OUTPUT).split('\n')
     if all_depends:
         colprint(f'Installing ¬{len(need_deps) - 1}¬ dependancies. Could take a while....{Color.END}', Color.CYAN)
