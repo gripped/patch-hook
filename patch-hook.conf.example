@@ -2,6 +2,7 @@
 ### 
 #########################################################################################################################################
 
+#allow_systemd = True
 #chroot = True
 #cleanup_after = True
 #colours = True
@@ -21,6 +22,10 @@
 #########################################################################################################################################
 ##
 ### Values True,true and False,false are reserved for Booleans
+##
+## allow_systemd: Boolean			True:	Leave systemd in Arch/Alhp chroot build enviroment.
+##									False:	Remove systemd from Arch/Alhp chroot build enviroment.
+##									Default	True
 ##
 ## chroot: Boolean					True:	Build in a  clean chroot. (Default True)
 ##									False:	Build normally with existing installed packages.

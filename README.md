@@ -9,7 +9,8 @@ patch-hook can be run manually on a package which is passed as an argument.
 Or it can be called from a hook.
 
 Configuration is via '/etc/patch-hook.conf', '/etc/patch-hook/patch-hook.conf', '/etc/patch-hook/{pkg_to_patch}.conf' (Least precidence first listed)  
-patch-hook.conf.example shows the available options.
+patch-hook.conf.example shows the available options.  
+On an Artix system where you are patching an Arch package in a chroot you should set `allow_systemd = False`. This removes systemd and prevents it's re-installation in the chroot.
 
 By default directories are created under /var/patch-hook.  
 By default patch-hook will look for patches in dir /var/patch-hook/patches/{pkg_to_patch}  
