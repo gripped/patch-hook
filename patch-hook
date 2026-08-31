@@ -7,6 +7,8 @@ import fileinput
 import glob
 import os
 import pwd
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -14,13 +16,13 @@ import time
 from configparser import ConfigParser
 from datetime import datetime
 from pathlib import Path
-from threading import Thread
 
-### Defaults overidden if a config file is found ###
+# Defaults overidden if a config file is found ###
 allow_systemd = True
 chroot = True
 cleanup_after = True
 colours = True
+custom_code_allowed = False # only set here
 custom_git = ''
 log = False
 makepkg_conf = ''
@@ -32,6 +34,7 @@ patch_hook_patch_dir = ''
 print_sys_cmds = True
 quiet = True
 safe_efi = True
+sonicde = False
 remove_make_depends = False
 user = ''
 ####################
@@ -58,7 +61,7 @@ def apply_patches(patches):
         colprint(f'Try ¬{pkg_build_dir}/src/{pdir}¬', Color.CYAN)
         for patch in patches:
             colprint(f'Patch ¬{patch}¬', Color.CYAN)
-            if run_command(f"patch -p1 < ../{patch}", EXIT_CODE) == 0:
+            if run_command(f"patch -p1 < ../{patch}", EXIT_CODE, shell=True) == 0:
                 colprint(f'Patch ¬{patch}¬ applied sucessfully', Color.CYAN)
                 patched_num += 1
         return patched_num
@@ -117,6 +120,7 @@ def build_package():
         switch_to_user(ROOT)
         return True
     switch_to_user(ROOT)
+    return False
 
 
 def checkout_arch_stable():
@@ -160,29 +164,29 @@ def chroot_exit():
 
 def chroot_make():
     def chroot_artix_strap():
-    #     def rank_mirrors():
-    #         def run_curl(url, mirror_url):
-    #             output = run_command(f'curl -s -m 2 -w "%{{http_code}} %{{time_total}}" {url} -o /dev/null', OUTPUT)
-    #             output_list.append(f'{output} {mirror_url}')
-    # 
-    #         colprint(f'Selecting fastest mirror', Color.CYAN)
-    #         lines = run_command("curl -sS https://gitea.artixlinux.org/packages/artix-mirrorlist/raw/branch/master/mirrorlist", OUTPUT).split('\n')
-    #         mirrors = [line.replace('Server = ', '').replace('https:', 'http:').strip() for line in lines if line.startswith('Server = ')
-    #                    and ('https://artix.' not in line and '.artixlinux.' not in line)]
-    #         thread_list = []
-    #         output_list = []
-    #         for line in mirrors:
-    #             time_url = line.replace('$repo', 'system').replace('$arch', 'x86_64/system.db')
-    #             thread = Thread(target=run_curl, args=(time_url, line))
-    #             thread_list.append(thread)
-    #             thread.start()
-    #         for thread in thread_list:
-    #             thread.join()
-    #         filtered_list = [item for item in output_list if item.startswith('200')]
-    #         sorted_list = sorted(filtered_list, key=lambda x: float(x.split()[1]))
-    #         fastest_mirror_url = sorted_list[0].split()[2]
-    #         colprint(f"\nUsing mirror ¬{fastest_mirror_url.split('/')[2]}¬ time ¬{sorted_list[0].split()[1]}¬", Color.CYAN)
-    #         return fastest_mirror_url
+        # def rank_mirrors():
+        #     def run_curl(url, mirror_url):
+        #         output = run_command(f'curl -s -m 2 -w "%{{http_code}} %{{time_total}}" {url} -o /dev/null', OUTPUT)
+        #         output_list.append(f'{output} {mirror_url}')
+        #
+        #     colprint(f'Selecting fastest mirror', Color.CYAN)
+        #     lines = run_command("curl -sS https://gitea.artixlinux.org/packages/artix-mirrorlist/raw/branch/master/mirrorlist", OUTPUT).split('\n')
+        #     mirrors = [line.replace('Server = ', '').replace('https:', 'http:').strip() for line in lines if line.startswith('Server = ')
+        #                and ('https://artix.' not in line and '.artixlinux.' not in line)]
+        #     thread_list = []
+        #     output_list = []
+        #     for line in mirrors:
+        #         time_url = line.replace('$repo', 'system').replace('$arch', 'x86_64/system.db')
+        #         thread = Thread(target=run_curl, args=(time_url, line))
+        #         thread_list.append(thread)
+        #         thread.start()
+        #     for thread in thread_list:
+        #         thread.join()
+        #     filtered_list = [item for item in output_list if item.startswith('200')]
+        #     sorted_list = sorted(filtered_list, key=lambda x: float(x.split()[1]))
+        #     fastest_mirror_url = sorted_list[0].split()[2]
+        #     colprint(f"\nUsing mirror ¬{fastest_mirror_url.split('/')[2]}¬ time ¬{sorted_list[0].split()[1]}¬", Color.CYAN)
+        #     return fastest_mirror_url
 
         if run_command(f'git clone https://github.com/gripped/artix-bootstrap.git {patch_hook_build_dir}/artix-bootstrap', EXIT_CODE) != 0:
             return False
@@ -191,7 +195,7 @@ def chroot_make():
         # mirror = rank_mirrors()
         colprint('Running artix-bootstrap. Could take a while....', Color.CYAN)
         # if run_command(f"./artix-bootstrap.sh -r {mirror.replace('/$repo/os/$arch', '')} {chroot_dir}", EXIT_CODE) != 0:
-        if run_command(f"./artix-bootstrap.sh {chroot_dir}", EXIT_CODE) != 0:
+        if run_command(f"./artix-bootstrap.sh {chroot_dir}", EXIT_CODE) != 0:   
             return False
         return True
 
@@ -206,6 +210,11 @@ def chroot_make():
         [print(line.replace('Include = /etc/pacman.d/mirrorlist', 'Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch'), end='') for line in fileinput.input('pacman.conf', inplace=True)]
         with open(f'pacman.conf', 'a') as file:
             file.write("\n[multilib]\nServer = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n")
+        if pkg_details['distro'] == 'mysonicde':
+            with open(f'pacman.conf', 'a') as file:
+                file.write("\n[sonicde-artix-unofficial]\nServer = https://gripped.github.io/sonicde-artix-unofficial/\n")
+        elif pkg_details['distro'] == 'sonicde':
+            file.write('\n[sonicde]\nServer = https://sonicde-arch.github.io/$arch\n')
         if run_command(f"make pacstrap", EXIT_CODE) != 0:
             return False
         os.chmod('pacstrap', 0o755)
@@ -282,9 +291,11 @@ def chroot_setup():
     os.chroot(chroot_dir)
     if pkg_details['distro'] != 'artix' and not allow_systemd:
         dkill()
-    else:
+    if pkg_details['distro'] == 'artix':
         run_command('pacman-key --init', OUTPUT)
         run_command('pacman-key --populate artix', OUTPUT)
+    # run_command('pacman -Sy', EXIT_CODE)
+
     need_deps = run_command(f"pacman -Sp {pkg_details['pkgbase']}", OUTPUT).split('\n')
     if all_depends:
         colprint(f'Installing ¬{len(need_deps) - 1}¬ dependancies. Could take a while....{Color.END}', Color.CYAN)
@@ -301,7 +312,7 @@ def chroot_unmount():
     for sys_mount in sys_mounts:
         run_command(f'umount -vR {chroot_dir}/{sys_mount}', EXIT_CODE)
     run_command(f'umount -vR {chroot_dir}', EXIT_CODE)
-    mnts_not_gone = run_command(f"mount |grep {patch_hook_build_dir}/chroot | awk '{{print $3}}'", OUTPUT).replace('\n', ' ').split(' ')[:-1]
+    mnts_not_gone = run_command(f"mount |grep {patch_hook_build_dir}/chroot | awk '{{print $3}}'", OUTPUT, shell=True).replace('\n', ' ').split(' ')[:-1]
     if mnts_not_gone:
         run_command(f'umount -vl {chroot_dir}', EXIT_CODE)
     return True
@@ -347,7 +358,7 @@ def config():
     if p_hook_conf_path:
         valid = ['allow_systemd','chroot', 'cleanup_after', 'colours', 'custom_git', 'log', 'makepkg_conf', 'patch_hook_dir',
                  'patch_hook_build_dir', 'patch_hook_cache_dir', 'patch_hook_patch_dir', 'print_sys_cmds',
-                 'quiet', 'safe_efi', 'remove_make_depends', 'user']
+                 'quiet', 'safe_efi', 'sonicde', 'remove_make_depends', 'user']
         config = ConfigParser()
         with open(p_hook_conf_path) as stream:
             config.read_string("[SECTION]\n" + stream.read())
@@ -368,7 +379,7 @@ def config():
 def copy_patches():
     colprint("Copying Patches", Color.CYAN)
     # patches = os.listdir(patch_dir)
-    patches = [p for p in os.listdir(patch_dir) if p.endswith(('.diff', '.patch'))]
+    patches = [sanitise_filename(p) for p in os.listdir(patch_dir) if p.endswith(('.diff', '.patch'))]
     for patch in patches:
         shutil.copyfile(f'{patch_dir}/{patch}', f'{pkg_build_dir}/src/{patch}')
     return patches
@@ -391,7 +402,8 @@ def create_log_file():
 
 
 def custom_code(section):
-    with open(f"{patch_dir}/{pkg_to_patch}.py") as f: exec(f.read())
+    if custom_code_allowed:
+        with open(f"{patch_dir}/{pkg_to_patch}.py") as f: exec(f.read())
 
 
 def edit_alhp_pkgrel():
@@ -417,12 +429,21 @@ def get_build_files():
         url = custom_git
     elif pkg_details['distro'] == 'artix':
         url = f"https://gitea.artixlinux.org/packages/{pkg_details['pkgbase']}.git"
+    elif pkg_details['distro'] == 'mysonicde':
+        url = f"https://github.com/gripped/sonicde-artix-unofficial-pkgbuilds.git"
+    elif pkg_details['distro'] == 'sonicde':
+        url = f"https://github.com/sonicde-artix/sonicde-artix.git"
     else:
         url = f"https://gitlab.archlinux.org/archlinux/packaging/packages/{pkg_details['pkgbase']}.git"
     switch_to_user(normal_user)
-    if run_command(f"git clone {url} {pkg_build_dir}", EXIT_CODE) != 0:
-        colprint(f"Failed to clone build files. Quitting ¬{pkg_build_dir}¬", Color.RED)
+    os.chdir(patch_hook_build_dir)
+    if run_command(f"git clone {url}", EXIT_CODE) != 0:
+        colprint(f"Failed to clone build files. Quitting.", Color.RED)
         sys.exit(1)
+    if pkg_details['distro'] == 'sonicde':
+        shutil.copytree(os.path.join(patch_hook_build_dir, 'sonicde-artix', pkg_details['pkgname']), os.path.join(patch_hook_build_dir, pkg_details['pkgname']))
+    if pkg_details['distro'] == 'mysonicde':
+        shutil.copytree(os.path.join(patch_hook_build_dir, 'sonicde-artix-unofficial-pkgbuilds', pkg_details['pkgname']), os.path.join(patch_hook_build_dir, pkg_details['pkgname']))
     switch_to_user(ROOT)
 
 
@@ -432,7 +453,7 @@ def get_depends(depend_types):
         colprint("No ¬.SRCINFO¬ Creating one", Color.CYAN)
         os.chdir(pkg_build_dir)
         switch_to_user(normal_user)
-        if run_command(f"makepkg --printsrcinfo > .SRCINFO", EXIT_CODE):
+        if run_command(f"makepkg --printsrcinfo > .SRCINFO", EXIT_CODE, shell=True):
             colprint(f"Failed to create ¬.SRCINFO¬ Quitting", Color.RED)
             sys.exit(1)
         switch_to_user(ROOT)
@@ -486,6 +507,10 @@ def get_pkg_details():
                 distro = "arch"
             elif "alhp@" in packager:
                 distro = "alhp"
+            elif "https://github.com/gripped/sonide-artix-unofficial" in packager:
+                distro = "mysonicde"
+            elif "@sonicde.org" in packager:
+                distro = "sonicde"
             else:
                 colprint(f"Script only handles ¬Artix¬ and ¬Arch(+Alhp)¬ and setup custom packages. Quitting", Color.RED)
                 exit_now(1)
@@ -541,13 +566,15 @@ def package_is_installed(pkg):
         return True
 
 
-def run_command(cmd, opt):
+def run_command(cmd, opt, shell=False):
     try:
         if print_sys_cmds:
             colprint(f'{cmd}', Color.GREEN)
             if log and log_file:
                 os.write(log_file, cmd.encode())
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True, text=True, user=os.geteuid(), group=os.getegid())
+        if not shell:
+            cmd = shlex.split(cmd)
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell, text=True, user=os.geteuid(), group=os.getegid())
         os.set_blocking(process.stdout.fileno(), False)
         os.set_blocking(process.stderr.fileno(), False)
         stdout_lines = []
@@ -576,6 +603,28 @@ def run_command(cmd, opt):
         return 'Error'
 
 
+def sanitise_filename(name):
+    if not re.match(r'^[a-zA-Z0-9._-]+$', name):
+        colprint(f"Invalid package name or filename: '{name}'", Color.RED)
+        exit_now(1)
+    return name
+
+def sanitise_path(path):
+    if not re.match(r'^/[a-zA-Z0-9/_-]+$', path):
+        colprint(f"Invalid path: '{path}'", Color.RED)
+        exit_now(1)
+    return path
+
+
+def sanitise_url(url):
+    if not url:
+        return url  # empty is allowed (default)
+    if not re.match(r'^https?://[a-zA-Z0-9./_-]+$', url):
+        colprint(f"Invalid URL: '{url}' – only http/https with alnum, dot, slash, underscore, hyphen allowed.", Color.RED)
+        exit_now(1)
+    return url
+
+
 def setup_build_files():
     test = f"{patch_dir}/{pkg_to_patch}.py"
     if Path(f"{patch_dir}/{pkg_to_patch}.py").is_file():
@@ -583,7 +632,7 @@ def setup_build_files():
         return
     if pkg_details['distro'] == 'artix':
         checkout_artix_stable()
-    else:
+    elif pkg_details['distro'] == 'arch' or pkg_details['distro'] == 'alhp':
         checkout_arch_stable()
 
 
@@ -598,11 +647,11 @@ def setup_dirs():
         if not Path(mdir).exists():
             os.makedirs(mdir)
 
-    p_hook_dir = patch_hook_dir if patch_hook_dir else '/var/patch-hook'
-    p_hook_build_dir = patch_hook_build_dir if patch_hook_build_dir else f'{p_hook_dir}/build'
-    p_hook_cache_dir = patch_hook_cache_dir if patch_hook_cache_dir else f'{p_hook_dir}/cache'
-    p_hook_log_dir = patch_hook_log_dir if patch_hook_log_dir else f'{p_hook_dir}/log'
-    p_hook_patch_dir = patch_hook_patch_dir if patch_hook_patch_dir else f'{p_hook_dir}/patches'
+    p_hook_dir = sanitise_path(patch_hook_dir if patch_hook_dir else '/var/patch-hook')
+    p_hook_build_dir = sanitise_path(patch_hook_build_dir if patch_hook_build_dir else f'{p_hook_dir}/build')
+    p_hook_cache_dir = sanitise_path(patch_hook_cache_dir if patch_hook_cache_dir else f'{p_hook_dir}/cache')
+    p_hook_log_dir = sanitise_path(patch_hook_log_dir if patch_hook_log_dir else f'{p_hook_dir}/log')
+    p_hook_patch_dir = sanitise_path(patch_hook_patch_dir if patch_hook_patch_dir else f'{p_hook_dir}/patches')
 
     if patch_hook_build_dir:
         if not Path(patch_hook_build_dir).is_dir():
@@ -638,8 +687,8 @@ def setup_dirs():
 
 
 def switch_to_user(usr):
-    os.setegid(usr[0])
-    os.seteuid(usr[1])
+    os.setegid(usr[1])
+    os.seteuid(usr[0])
 
 
 def tmp_mkpkg_conf():
@@ -660,10 +709,12 @@ success = False
 temp_log = '\0'
 if not colours:
     Color.CYAN = Color.RED = Color.GREEN = Color.ORANGE = Color.END
-pkg_to_patch = argument()
+pkg_to_patch = sanitise_filename(argument())
 
 try:
     patch_hook_conf_path = config()
+    custom_git = sanitise_url(custom_git)
+    makepkg_conf = sanitise_path(makepkg_conf) if makepkg_conf else '/etc/makepkg.conf'
     normal_user = get_user()
     patch_hook_dir, patch_hook_build_dir, patch_hook_cache_dir, patch_hook_log_dir, patch_hook_patch_dir = setup_dirs()
     patch_dir = f"{patch_hook_patch_dir}/{pkg_to_patch}"
@@ -683,7 +734,7 @@ except Exception as e:
     colprint("Something went wrong. Possibly the next line will tell you more?", Color.RED)
     colprint(' '.join(map(str, e.args)), Color.RED)
     exit_now(1)
-    
+
 try:
     get_build_files()
     setup_build_files()
@@ -730,7 +781,7 @@ except (Exception, SystemExit) as e:
         os.close(root_dir_fd)
         chroot_unmount()
     elif chroot and 'chroot_dir' in globals():
-        if run_command(f"mount |grep {patch_hook_build_dir}/chroot | awk '{{print $3}}'", OUTPUT).replace('\n', ' ').split(' ')[:-1]:
+        if run_command(f"mount |grep {patch_hook_build_dir}/chroot | awk '{{print $3}}'", OUTPUT, shell=True).replace('\n', ' ').split(' ')[:-1]:
             chroot_unmount()
 
 finally:
